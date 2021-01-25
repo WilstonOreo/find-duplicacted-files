@@ -1,6 +1,6 @@
 use walkdir::WalkDir;
 
-pub fn for_each_file(directory: &str, func: mut fn(&str)) {
+pub fn for_each_file(directory: &str, mut func: impl FnMut(&str)) {
     for entry in WalkDir::new(directory)
     .into_iter()
     .filter_map(Result::ok)
