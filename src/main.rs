@@ -1,6 +1,5 @@
 use clap::{Arg, App};
-use std::{env, collections::HashMap, path::Path};
-use walkdir::WalkDir;
+use std::{collections::HashMap, path::Path};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::io::LineWriter;
@@ -10,24 +9,24 @@ use std::io::prelude::*;
 
 mod utils;
 
+#[derive(Clone)]
 struct FileEntry {
     fullpath: String,
-    filesize: u64
+    filesize: u64,
 }
 
-type FileTable = HashMap<u64, Vec<FileEntry>>;
-
+type FileHashTable = HashMap<u64, Vec<FileEntry>>;
 
 impl FileEntry {
-    fn new(filename: String, file: &File) -> FileEntry {
+    fn new(filename: &str, file: &File) -> FileEntry {
         FileEntry {
-            fullpath: filename,
+            fullpath: String::from(filename),
             filesize: file.metadata().unwrap().len()
         }
     }
 }
 
-fn write_filetable(table: &FileTable, file: &mut dyn std::io::Write) -> std::io::Result<()> {
+fn write_filetable(table: &FileHashTable, file: &mut dyn std::io::Write) -> std::io::Result<()> {
 
     let mut stream = LineWriter::new(file);
 
@@ -38,7 +37,7 @@ fn write_filetable(table: &FileTable, file: &mut dyn std::io::Write) -> std::io:
         }
 
         for f in files {
-            let line = format!("{};{};{}\n", if i == 0 { format!("{:016x}", hash) } else { String::from("---.---.---.---.") }, f.fullpath, f.filesize );
+            let line = format!("{};\"{}\";{}\n", if i == 0 { format!("{:016x}", hash) } else { String::from("---.---.---.---.") }, f.fullpath, f.filesize );
             stream.write_all(line.as_bytes())?;            
             i += 1;
         }
@@ -46,7 +45,7 @@ fn write_filetable(table: &FileTable, file: &mut dyn std::io::Write) -> std::io:
     Ok(())
 }
 
-fn file_hash(file: &mut dyn std::io::Read) -> std::io::Result<u64> {
+fn file_hash_read(file: &mut dyn std::io::Read) -> Result<u64,()> {
 
     let mut hasher = DefaultHasher::new();
     
@@ -54,13 +53,37 @@ fn file_hash(file: &mut dyn std::io::Read) -> std::io::Result<u64> {
 
     loop {
         let mut chunk = Vec::with_capacity(chunk_size);
-        let n = file.take(chunk_size as u64).read_to_end(&mut chunk)?;
-        if n == 0 { break; }
-        hasher.write(&chunk);
-        if n < chunk_size { break; }
+        let n = file.take(chunk_size as u64).read_to_end(&mut chunk);
+
+        match n {
+            Ok(n) => {
+                if n == 0 { break; }
+                hasher.write(&chunk);
+                if n < chunk_size { break; }
+            }
+            Err(_) => return Err(())
+        }
     }
 
     Ok(hasher.finish())
+}
+
+fn find_equal_files_by_hash(files: &Vec<FileEntry>, hash_fun: impl Fn(&String) -> Result<u64,()>) -> FileHashTable {
+
+    let mut hash_table: FileHashTable = HashMap::new();
+
+    for file in files {
+         let hash = hash_fun(&file.fullpath);
+         match hash {
+            Ok(hash) => 
+                hash_table.entry(hash)
+                    .or_insert(Vec::new())
+                    .push(file.clone()),
+            Err(why) => continue
+        };
+    }
+
+    hash_table
 }
 
 fn main() -> Result<(), ()> {
@@ -78,40 +101,72 @@ fn main() -> Result<(), ()> {
                  .long("csv")
                  .takes_value(true)
                  .help("Output CSV file"))
+        .arg(Arg::with_name("mode")
+                 .short("m")
+                 .long("mode")
+                 .takes_value(true)
+                 .help("Mode (default: filename)"))
         .get_matches();
     
     let directory = args.value_of("dir").unwrap_or(".");
     let csv = args.value_of("csv").unwrap_or("");
+    let mode = String::from(args.value_of("mode").unwrap_or("filename")).to_lowercase();
+    let mut files: Vec<FileEntry> = Vec::new();
 
-    let mut files: HashMap<u64, Vec<FileEntry>> = HashMap::new();
+    let hash_fun: fn(&String) -> Result<u64,()>;
 
-    let mut count: u64 = 0;
+    match &mode[..] {
+        "filename" => hash_fun = |filename| -> Result<u64,()> {
+            let mut hasher = DefaultHasher::new();
+            let filename = Path::new(filename).file_name();
+            match filename {
+                Some(filename) => hasher.write(filename.to_string_lossy().as_bytes()),
+                None => return Err(())
+            }
+
+            Ok(hasher.finish())
+        },
+        "exhaustive" => hash_fun = |filename| -> Result<u64,()> {
+            let mut f = File::open(&filename).unwrap();
+            file_hash_read(&mut f)
+        },
+        _ => {
+            eprintln!("Invalid mode: {}", mode);
+            return Err(())
+        }
+    }
 
     utils::for_each_file(directory, |filename: &str| {
-        count += 1;
-    });
-
-    println!("{} files in directory {}", count, directory);
-
-    utils::for_each_file(directory, |filename: &str| {
-        let mut file = File::open(&filename).unwrap();
+        let file = File::open(&filename).unwrap();
         if file.metadata().unwrap().is_dir() {
             return;
         }
 
-        files.entry(file_hash(&mut file).unwrap())
-            .or_insert(Vec::new())
-            .push(FileEntry::new(filename.to_string(), &file));
-        if files.len() % 100 == 0 && !csv.is_empty() {
-            println!("{:.2}% files processed", ((files.len() as f64) * 100.0) / (count as f64) );
-        }
+        files.push(FileEntry::new(filename, &file));
     });
+    eprintln!("{} files in directory {}", files.len(), directory);
 
-    if !csv.is_empty() {
-        let mut file = File::create(csv).unwrap();
-        write_filetable(&files, &mut file).unwrap();
-    } else {
-        write_filetable(&files, &mut std::io::stdout()).unwrap();
+    files.sort_by(|a, b| b.filesize.cmp(&a.filesize));
+    let mut files_eq_size = Vec::new();
+
+    for (prev, next) in files.iter().zip(files[1..].iter()) {
+        files_eq_size.push(prev.clone());
+
+        if prev.filesize != next.filesize || prev.filesize == 0 {
+            if files_eq_size.len() > 1 {
+                let hash_table = find_equal_files_by_hash(&files_eq_size, hash_fun);
+
+                if !csv.is_empty() {
+                    let mut file = File::create(csv).unwrap();
+                    write_filetable(&hash_table, &mut file).unwrap();
+                } else {
+                    write_filetable(&hash_table, &mut std::io::stdout()).unwrap();
+                }
+            }
+
+            files_eq_size.clear();
+            continue
+        }
     }
 
     Ok(())
