@@ -45,10 +45,8 @@ fn write_filetable(table: &FileHashTable, file: &mut dyn std::io::Write) -> std:
     Ok(())
 }
 
-fn file_hash_read(file: &mut dyn std::io::Read) -> Result<u64,()> {
-
+fn file_hash(file: &mut dyn std::io::Read) -> Result<u64,()> {
     let mut hasher = DefaultHasher::new();
-    
     let chunk_size = 0x400000;
 
     loop {
@@ -79,8 +77,8 @@ fn find_equal_files_by_hash(files: &Vec<FileEntry>, hash_fun: impl Fn(&String) -
                 hash_table.entry(hash)
                     .or_insert(Vec::new())
                     .push(file.clone()),
-            Err(why) => continue
-        };
+            Err(_) => continue
+        }
     }
 
     hash_table
@@ -114,6 +112,7 @@ fn main() -> Result<(), ()> {
     let mut files: Vec<FileEntry> = Vec::new();
 
     let hash_fun: fn(&String) -> Result<u64,()>;
+    let mut writer: Box<dyn std::io::Write> = if csv.is_empty() { Box::new(std::io::stdout()) } else { Box::new(File::create(csv).unwrap()) };
 
     match &mode[..] {
         "filename" => hash_fun = |filename| -> Result<u64,()> {
@@ -128,7 +127,7 @@ fn main() -> Result<(), ()> {
         },
         "exhaustive" => hash_fun = |filename| -> Result<u64,()> {
             let mut f = File::open(&filename).unwrap();
-            file_hash_read(&mut f)
+            file_hash(&mut f)
         },
         _ => {
             eprintln!("Invalid mode: {}", mode);
@@ -156,12 +155,7 @@ fn main() -> Result<(), ()> {
             if files_eq_size.len() > 1 {
                 let hash_table = find_equal_files_by_hash(&files_eq_size, hash_fun);
 
-                if !csv.is_empty() {
-                    let mut file = File::create(csv).unwrap();
-                    write_filetable(&hash_table, &mut file).unwrap();
-                } else {
-                    write_filetable(&hash_table, &mut std::io::stdout()).unwrap();
-                }
+                write_filetable(&hash_table, &mut *writer).unwrap();
             }
 
             files_eq_size.clear();
