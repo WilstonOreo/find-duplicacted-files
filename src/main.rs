@@ -8,6 +8,8 @@ use std::io::LineWriter;
 use std::fs::File;
 use std::io::prelude::*;
 
+mod utils;
+
 struct FileEntry {
     fullpath: String,
     filesize: u64
@@ -84,24 +86,17 @@ fn main() -> Result<(), ()> {
     let mut files: HashMap<u64, Vec<FileEntry>> = HashMap::new();
 
     let mut count: u64 = 0;
-    for _ in WalkDir::new(directory)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| !e.file_type().is_dir() && !e.path_is_symlink() ) {
+
+    utils::for_each_file(directory, |filename: &str| {
         count += 1;
-    }
+    });
+
     println!("{} files in directory {}", count, directory);
 
-    for entry in WalkDir::new(directory)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|e| !e.file_type().is_dir() && !e.path_is_symlink() ) {
-        
-        let filename = entry.path().to_str().unwrap();
+    utils::for_each_file(directory, |filename: &str| {
         let mut file = File::open(&filename).unwrap();
-
         if file.metadata().unwrap().is_dir() {
-            continue;
+            return;
         }
 
         files.entry(file_hash(&mut file).unwrap())
@@ -110,7 +105,7 @@ fn main() -> Result<(), ()> {
         if files.len() % 100 == 0 && !csv.is_empty() {
             println!("{:.2}% files processed", ((files.len() as f64) * 100.0) / (count as f64) );
         }
-    }
+    });
 
     if !csv.is_empty() {
         let mut file = File::create(csv).unwrap();
