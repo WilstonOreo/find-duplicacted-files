@@ -4,7 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
 use std::io::LineWriter;
 
-use std::fs::File;
+use std::fs::{File, metadata};
 use std::io::prelude::*;
 
 mod utils;
@@ -16,12 +16,13 @@ struct FileEntry {
 }
 
 type FileHashTable = HashMap<u64, Vec<FileEntry>>;
+type HashFn = fn(&FileEntry) -> Result<u64,()>;
 
 impl FileEntry {
-    fn new(filename: &str, file: &File) -> FileEntry {
+    fn new(filename: &str) -> FileEntry {
         FileEntry {
             fullpath: String::from(filename),
-            filesize: file.metadata().unwrap().len()
+            filesize: metadata(filename).unwrap().len()
         }
     }
 }
@@ -66,12 +67,11 @@ fn file_hash(file: &mut dyn std::io::Read) -> Result<u64,()> {
     Ok(hasher.finish())
 }
 
-fn find_equal_files_by_hash(files: &Vec<FileEntry>, hash_fun: impl Fn(&String) -> Result<u64,()>) -> FileHashTable {
-
+fn find_equal_files_by_hash(files: &Vec<FileEntry>, hash_fun: HashFn) -> FileHashTable {
     let mut hash_table: FileHashTable = HashMap::new();
 
     for file in files {
-         let hash = hash_fun(&file.fullpath);
+         let hash = hash_fun(&file);
          match hash {
             Ok(hash) => 
                 hash_table.entry(hash)
@@ -108,16 +108,16 @@ fn main() -> Result<(), ()> {
     
     let directory = args.value_of("dir").unwrap_or(".");
     let csv = args.value_of("csv").unwrap_or("");
-    let mode = String::from(args.value_of("mode").unwrap_or("filename")).to_lowercase();
+    let mode = String::from(args.value_of("mode").unwrap_or("filename_filesize")).to_lowercase();
     let mut files: Vec<FileEntry> = Vec::new();
 
-    let hash_fun: fn(&String) -> Result<u64,()>;
+    let hash_fun: HashFn;
     let mut writer: Box<dyn std::io::Write> = if csv.is_empty() { Box::new(std::io::stdout()) } else { Box::new(File::create(csv).unwrap()) };
 
     match &mode[..] {
-        "filename" => hash_fun = |filename| -> Result<u64,()> {
+        "filename" => hash_fun = |fileentry| -> Result<u64,()> {
             let mut hasher = DefaultHasher::new();
-            let filename = Path::new(filename).file_name();
+            let filename = Path::new(&fileentry.fullpath).file_name();
             match filename {
                 Some(filename) => hasher.write(filename.to_string_lossy().as_bytes()),
                 None => return Err(())
@@ -125,8 +125,21 @@ fn main() -> Result<(), ()> {
 
             Ok(hasher.finish())
         },
-        "exhaustive" => hash_fun = |filename| -> Result<u64,()> {
-            let mut f = File::open(&filename).unwrap();
+        "filename_filesize" => hash_fun = |fileentry| -> Result<u64,()> {
+            let mut hasher = DefaultHasher::new();
+            let fname = Path::new(&fileentry.fullpath).file_name();
+            match fname {
+                Some(fname) => {
+                    hasher.write(fname.to_string_lossy().as_bytes());
+                    hasher.write(format!("{}", fileentry.filesize).as_bytes());
+                },
+                None => return Err(())
+            }
+
+            Ok(hasher.finish())
+        },
+        "exhaustive" => hash_fun = |fileentry| -> Result<u64,()> {
+            let mut f = File::open(&fileentry.fullpath).unwrap();
             file_hash(&mut f)
         },
         _ => {
@@ -136,31 +149,13 @@ fn main() -> Result<(), ()> {
     }
 
     utils::for_each_file(directory, |filename: &str| {
-        let file = File::open(&filename).unwrap();
-        if file.metadata().unwrap().is_dir() {
-            return;
-        }
-
-        files.push(FileEntry::new(filename, &file));
+        files.push(FileEntry::new(filename));
     });
+
     eprintln!("{} files in directory {}", files.len(), directory);
-
-    files.sort_by(|a, b| b.filesize.cmp(&a.filesize));
-    let mut files_eq_size = Vec::new();
-
-    for (prev, next) in files.iter().zip(files[1..].iter()) {
-        files_eq_size.push(prev.clone());
-
-        if prev.filesize != next.filesize || prev.filesize == 0 {
-            if files_eq_size.len() > 1 {
-                let hash_table = find_equal_files_by_hash(&files_eq_size, hash_fun);
-
-                write_filetable(&hash_table, &mut *writer).unwrap();
-            }
-
-            files_eq_size.clear();
-            continue
-        }
+    if files.len() > 1 {
+        let hash_table = find_equal_files_by_hash(&files, hash_fun);
+        write_filetable(&hash_table, &mut *writer).unwrap();
     }
 
     Ok(())
